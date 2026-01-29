@@ -1,0 +1,774 @@
+// 直接导入 Three.js 包
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+console.log('Three.js 版本:', THREE.REVISION);
+
+// 获取canvas元素
+const canvas = document.getElementById('background');
+
+// 创建场景
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xfffdef);
+
+// 创建相机
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 0, 5);
+
+// 创建渲染器
+const renderer = new THREE.WebGLRenderer({ 
+    canvas,
+    antialias: true,
+    alpha: true
+});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+// 存储UV层数据
+const uvLayers = [];
+let brainModel = null;
+let customMaterial = null;
+
+// 预定义的颜色梯度
+const colorGradients = {
+    'jet': [
+        [0, 0, 0.5],     // 深蓝
+        [0, 0, 1],       // 蓝
+        [0, 0.5, 1],     // 青蓝
+        [0, 1, 1],       // 青
+        [0.5, 1, 0.5],   // 绿
+        [1, 1, 0],       // 黄
+        [1, 0.5, 0],     // 橙
+        [1, 0, 0],       // 红
+        [0.5, 0, 0]      // 深红
+    ],
+    'hot': [
+        [0, 0, 0],       // 黑
+        [1, 0, 0],       // 红
+        [1, 1, 0],       // 黄
+        [1, 1, 1]        // 白
+    ],
+    'cool': [
+        [0, 1, 1],       // 青
+        [1, 0, 1]        // 紫
+    ],
+    'rainbow': [
+        [1, 0, 0],       // 红
+        [1, 0.5, 0],     // 橙
+        [1, 1, 0],       // 黄
+        [0, 1, 0],       // 绿
+        [0, 1, 1],       // 青
+        [0, 0, 1],       // 蓝
+        [0.5, 0, 0.5]    // 紫
+    ]
+};
+
+// 生成颜色纹理的函数
+function generateColorTexture(gradientName, width = 256, height = 1) {
+    const gradient = colorGradients[gradientName];
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    
+    const gradientObj = ctx.createLinearGradient(0, 0, width, 0);
+    
+    for (let i = 0; i < gradient.length; i++) {
+        const [r, g, b] = gradient[i];
+        const color = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+        gradientObj.addColorStop(i / (gradient.length - 1), color);
+    }
+    
+    ctx.fillStyle = gradientObj;
+    ctx.fillRect(0, 0, width, height);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+}
+
+// 生成模拟的fNIRS数据纹理
+function generateFNIRSTexture(width = 512, height = 512) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    
+    // 创建大脑形状的模拟数据
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, width, height);
+    
+    // 模拟左脑活动
+    const leftBrain = new Path2D();
+    leftBrain.ellipse(width * 0.4, height * 0.5, width * 0.3, height * 0.45, 0, 0, Math.PI * 2);
+    
+    // 模拟右脑活动
+    const rightBrain = new Path2D();
+    rightBrain.ellipse(width * 0.6, height * 0.5, width * 0.3, height * 0.45, 0, 0, Math.PI * 2);
+    
+    // 创建径向渐变模拟活动热点
+    function createHotspot(x, y, radius, intensity) {
+        const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+        gradient.addColorStop(0, `rgba(255, 0, 0, ${intensity})`);
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    
+    // 添加热点（模拟脑活动区域）
+    createHotspot(width * 0.35, height * 0.4, width * 0.15, 0.8);  // 前额叶
+    createHotspot(width * 0.45, height * 0.6, width * 0.1, 0.6);   // 运动皮层
+    createHotspot(width * 0.55, height * 0.4, width * 0.12, 0.7);  // 右侧前额叶
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+}
+
+// 创建自定义多UV着色器材质
+function createMultiUVMaterial(baseColor = 0x444444) {
+    return new THREE.ShaderMaterial({
+        uniforms: {
+            baseColor: { value: new THREE.Color(baseColor) },
+            uvLayer1: { value: null },
+            uvLayer2: { value: null },
+            uvLayer3: { value: null },
+            uvLayer4: { value: null },
+            colorRamp1: { value: generateColorTexture('jet') },
+            colorRamp2: { value: generateColorTexture('hot') },
+            colorRamp3: { value: generateColorTexture('cool') },
+            colorRamp4: { value: generateColorTexture('rainbow') },
+            opacity1: { value: 0.0 },
+            opacity2: { value: 0.0 },
+            opacity3: { value: 0.0 },
+            opacity4: { value: 0.0 },
+            blendMode: { value: 0 }, // 0: additive, 1: multiply, 2: overlay, 3: difference
+            globalOpacity: { value: 0.5 },
+            time: { value: 0.0 }
+        },
+        vertexShader: `
+            varying vec3 vNormal;
+            varying vec3 vPosition;
+            varying vec2 vUv;
+            
+            void main() {
+                vNormal = normalize(normalMatrix * normal);
+                vPosition = position;
+                vUv = uv;
+                
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: `
+            uniform vec3 baseColor;
+            uniform sampler2D uvLayer1;
+            uniform sampler2D uvLayer2;
+            uniform sampler2D uvLayer3;
+            uniform sampler2D uvLayer4;
+            uniform sampler2D colorRamp1;
+            uniform sampler2D colorRamp2;
+            uniform sampler2D colorRamp3;
+            uniform sampler2D colorRamp4;
+            uniform float opacity1;
+            uniform float opacity2;
+            uniform float opacity3;
+            uniform float opacity4;
+            uniform int blendMode;
+            uniform float globalOpacity;
+            uniform float time;
+            
+            varying vec3 vNormal;
+            varying vec3 vPosition;
+            varying vec2 vUv;
+            
+            // 颜色混合函数
+            vec3 blendAdditive(vec3 base, vec3 blend, float opacity) {
+                return base + blend * opacity;
+            }
+            
+            vec3 blendMultiply(vec3 base, vec3 blend, float opacity) {
+                return mix(base, base * blend, opacity);
+            }
+            
+            vec3 blendOverlay(vec3 base, vec3 blend, float opacity) {
+                vec3 result = vec3(0.0);
+                for (int i = 0; i < 3; i++) {
+                    if (base[i] < 0.5) {
+                        result[i] = 2.0 * base[i] * blend[i];
+                    } else {
+                        result[i] = 1.0 - 2.0 * (1.0 - base[i]) * (1.0 - blend[i]);
+                    }
+                }
+                return mix(base, result, opacity);
+            }
+            
+            vec3 blendDifference(vec3 base, vec3 blend, float opacity) {
+                return mix(base, abs(base - blend), opacity);
+            }
+            
+            // 从颜色梯度图中获取颜色
+            vec3 getRampColor(float value, sampler2D ramp) {
+                return texture2D(ramp, vec2(clamp(value, 0.0, 1.0), 0.5)).rgb;
+            }
+            
+            void main() {
+                // 基础光照
+                vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+                float diff = max(dot(vNormal, lightDir), 0.1);
+                vec3 base = baseColor * diff;
+                
+                // 初始化结果颜色
+                vec3 result = base;
+                
+                // 处理每个UV层
+                if (opacity1 > 0.0) {
+                    float value1 = texture2D(uvLayer1, vUv).r;
+                    vec3 color1 = getRampColor(value1, colorRamp1);
+                    
+                    if (blendMode == 0) result = blendAdditive(result, color1, opacity1);
+                    else if (blendMode == 1) result = blendMultiply(result, color1, opacity1);
+                    else if (blendMode == 2) result = blendOverlay(result, color1, opacity1);
+                    else if (blendMode == 3) result = blendDifference(result, color1, opacity1);
+                }
+                
+                if (opacity2 > 0.0) {
+                    float value2 = texture2D(uvLayer2, vUv).r;
+                    vec3 color2 = getRampColor(value2, colorRamp2);
+                    
+                    if (blendMode == 0) result = blendAdditive(result, color2, opacity2);
+                    else if (blendMode == 1) result = blendMultiply(result, color2, opacity2);
+                    else if (blendMode == 2) result = blendOverlay(result, color2, opacity2);
+                    else if (blendMode == 3) result = blendDifference(result, color2, opacity2);
+                }
+                
+                if (opacity3 > 0.0) {
+                    float value3 = texture2D(uvLayer3, vUv).r;
+                    vec3 color3 = getRampColor(value3, colorRamp3);
+                    
+                    if (blendMode == 0) result = blendAdditive(result, color3, opacity3);
+                    else if (blendMode == 1) result = blendMultiply(result, color3, opacity3);
+                    else if (blendMode == 2) result = blendOverlay(result, color3, opacity3);
+                    else if (blendMode == 3) result = blendDifference(result, color3, opacity3);
+                }
+                
+                if (opacity4 > 0.0) {
+                    float value4 = texture2D(uvLayer4, vUv).r;
+                    vec3 color4 = getRampColor(value4, colorRamp4);
+                    
+                    if (blendMode == 0) result = blendAdditive(result, color4, opacity4);
+                    else if (blendMode == 1) result = blendMultiply(result, color4, opacity4);
+                    else if (blendMode == 2) result = blendOverlay(result, color4, opacity4);
+                    else if (blendMode == 3) result = blendDifference(result, color4, opacity4);
+                }
+                
+                // 应用全局透明度
+                gl_FragColor = vec4(result, globalOpacity);
+            }
+        `,
+        side: THREE.DoubleSide,
+        transparent: true,
+        depthWrite: false
+    });
+}
+
+// 添加光源
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+scene.add(ambientLight);
+
+const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+directionalLight.position.set(10, 10, 5);
+directionalLight.castShadow = true;
+scene.add(directionalLight);
+
+// 添加鼠标控制器
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+// 修复的模型加载函数
+const gltfLoader = new GLTFLoader();
+gltfLoader.load(
+    '/public/brain.glb',
+    (gltf) => {
+        console.log('GLTF加载成功:', gltf);
+        brainModel = gltf.scene;
+        
+        // 检查模型是否有UV属性
+        let hasUV = false;
+        brainModel.traverse((child) => {
+            if (child.isMesh && child.geometry.attributes.uv) {
+                hasUV = true;
+                console.log(`${child.name} 有UV属性`);
+            }
+        });
+        
+        // 创建自定义材质
+        customMaterial = createMultiUVMaterial(0x333333);
+        
+        // 应用材质到模型
+        brainModel.traverse((child) => {
+            if (child.isMesh) {
+                const originalGeometry = child.geometry;
+                
+                // 确保几何体有UV属性
+                if (!originalGeometry.attributes.uv) {
+                    console.log(`${child.name} 没有UV属性，创建默认UV`);
+                    
+                    // 创建默认UV映射（球面映射）
+                    const positions = originalGeometry.attributes.position;
+                    const count = positions.count;
+                    const uvs = [];
+                    
+                    for (let i = 0; i < count; i++) {
+                        const x = positions.getX(i);
+                        const y = positions.getY(i);
+                        const z = positions.getZ(i);
+                        
+                        // 球面映射
+                        const u = (Math.atan2(z, x) + Math.PI) / (2 * Math.PI);
+                        const v = (Math.asin(y) + Math.PI / 2) / Math.PI;
+                        uvs.push(u, 1 - v); // 翻转V坐标
+                    }
+                    
+                    originalGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+                }
+                
+                // 创建第二套UV（如果需要）
+                if (!originalGeometry.attributes.uv2) {
+                    // 复制第一套UV
+                    const uvArray = originalGeometry.attributes.uv.array;
+                    originalGeometry.setAttribute('uv2', new THREE.Float32BufferAttribute(uvArray.slice(), 2));
+                }
+                
+                child.material = customMaterial;
+                child.castShadow = true;
+                child.receiveShadow = true;
+            }
+        });
+        
+        // 调整模型位置和大小
+        const box = new THREE.Box3().setFromObject(brainModel);
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        
+        if (maxDim > 0) {
+            brainModel.scale.set(3 / maxDim, 3 / maxDim, 3 / maxDim);
+        } else {
+            brainModel.scale.set(1, 1, 1);
+        }
+        
+        brainModel.position.set(0, 0, 0);
+        
+        scene.add(brainModel);
+        
+        console.log('脑模型加载成功，多UV材质已应用');
+        
+        // 创建UI控制面板
+        createUVControlPanel();
+        
+        // 添加默认的UV层
+        addUVLayer('UV1', generateFNIRSTexture());
+        addUVLayer('UV2', generateSimulatedEEGTexture());
+    },
+    (xhr) => {
+        console.log(`${(xhr.loaded / xhr.total * 100)}% loaded`);
+    },
+    (error) => {
+        console.error('模型加载失败:', error);
+        // 创建替代的脑模型
+        createFallbackBrainModel();
+    }
+);
+
+// 生成模拟的EEG数据纹理
+function generateSimulatedEEGTexture(width = 512, height = 512) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    
+    // 创建噪声模式
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, width, height);
+    
+    // 添加大脑皮层区域的模式
+    const centerX = width / 2;
+    const centerY = height / 2;
+    
+    // 创建同心圆模式模拟电极
+    for (let i = 0; i < 5; i++) {
+        const radius = (i + 1) * width / 10;
+        const intensity = 0.5 + 0.5 * Math.sin(i);
+        
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(0, 255, 255, ${intensity * 0.3})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+    
+    // 添加电极点
+    for (let i = 0; i < 16; i++) {
+        const angle = (i / 16) * Math.PI * 2;
+        const distance = width * 0.4;
+        const x = centerX + Math.cos(angle) * distance;
+        const y = centerY + Math.sin(angle) * distance;
+        
+        const intensity = 0.5 + 0.5 * Math.sin(i * 0.5);
+        
+        ctx.beginPath();
+        ctx.arc(x, y, 8, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(0, 255, 255, ${intensity})`;
+        ctx.fill();
+    }
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+}
+
+// 创建UV层控制面板
+function createUVControlPanel() {
+    const container = document.getElementById('uv-layers-container');
+    if (!container) return;
+    
+    // 清除现有内容
+    container.innerHTML = '';
+    
+    uvLayers.forEach((layer, index) => {
+        const layerDiv = document.createElement('div');
+        layerDiv.className = 'uv-layer';
+        layerDiv.id = `layer-${index}`;
+        
+        layerDiv.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <strong>${layer.name}</strong>
+                <button onclick="window.removeUVLayer(${index})" style="background:none; border:none; color:#ff6b6b; cursor:pointer;">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="color-ramp" id="ramp-${index}"></div>
+            <div class="layer-controls">
+                <button onclick="window.changeGradient(${index}, 'jet')">Jet</button>
+                <button onclick="window.changeGradient(${index}, 'hot')">Hot</button>
+                <button onclick="window.changeGradient(${index}, 'cool')">Cool</button>
+                <button onclick="window.changeGradient(${index}, 'rainbow')">Rainbow</button>
+            </div>
+            <label style="display:block; margin-top:5px;">不透明度: 
+                <span id="opacity-display-${index}">${layer.opacity.toFixed(1)}</span>
+            </label>
+            <input type="range" min="0" max="1" step="0.1" value="${layer.opacity}" 
+                   oninput="window.updateLayerOpacity(${index}, this.value)" style="width:100%;">
+        `;
+        
+        container.appendChild(layerDiv);
+        
+        // 更新颜色梯度显示
+        updateRampDisplay(index, layer.gradient);
+    });
+    
+    // 添加全局控制事件监听器
+    const globalOpacityInput = document.getElementById('global-opacity');
+    const blendModeSelect = document.getElementById('blend-mode');
+    const addButton = document.getElementById('add-uv-layer');
+    
+    if (globalOpacityInput) {
+        globalOpacityInput.addEventListener('input', (e) => {
+            const value = parseFloat(e.target.value);
+            const display = document.getElementById('opacity-value');
+            if (display) display.textContent = value.toFixed(1);
+            
+            if (customMaterial) {
+                customMaterial.uniforms.globalOpacity.value = value;
+            }
+        });
+    }
+    
+    if (blendModeSelect) {
+        blendModeSelect.addEventListener('change', (e) => {
+            const blendModes = {
+                'additive': 0,
+                'multiply': 1,
+                'overlay': 2,
+                'difference': 3
+            };
+            
+            if (customMaterial) {
+                customMaterial.uniforms.blendMode.value = blendModes[e.target.value] || 0;
+            }
+        });
+    }
+    
+    if (addButton) {
+        addButton.addEventListener('click', () => {
+            const layerName = prompt('输入新UV层的名称:', `数据层 ${uvLayers.length + 1}`);
+            if (layerName) {
+                addUVLayer(layerName, generateSimulatedDataTexture());
+            }
+        });
+    }
+}
+
+// 添加新的UV层
+function addUVLayer(name, texture) {
+    const newLayer = {
+        name,
+        texture,
+        opacity: 0.5,
+        gradient: 'jet',
+        index: uvLayers.length
+    };
+    
+    uvLayers.push(newLayer);
+    
+    // 更新着色器uniform
+    if (customMaterial) {
+        const uniformName = `uvLayer${uvLayers.length}`;
+        const opacityName = `opacity${uvLayers.length}`;
+        
+        customMaterial.uniforms[uniformName].value = texture;
+        customMaterial.uniforms[opacityName].value = newLayer.opacity;
+    }
+    
+    // 更新UI
+    createUVControlPanel();
+}
+
+// 更新UV层不透明度
+function updateLayerOpacity(index, value) {
+    if (uvLayers[index]) {
+        uvLayers[index].opacity = parseFloat(value);
+        
+        // 更新显示
+        const display = document.getElementById(`opacity-display-${index}`);
+        if (display) display.textContent = value;
+        
+        // 更新着色器uniform
+        if (customMaterial) {
+            const opacityName = `opacity${index + 1}`;
+            customMaterial.uniforms[opacityName].value = parseFloat(value);
+        }
+    }
+}
+
+// 更改颜色梯度
+function changeGradient(index, gradientName) {
+    if (uvLayers[index]) {
+        uvLayers[index].gradient = gradientName;
+        
+        // 更新着色器uniform
+        if (customMaterial) {
+            const rampName = `colorRamp${index + 1}`;
+            customMaterial.uniforms[rampName].value = generateColorTexture(gradientName);
+        }
+        
+        // 更新显示
+        updateRampDisplay(index, gradientName);
+    }
+}
+
+// 更新颜色梯度显示
+function updateRampDisplay(index, gradientName) {
+    const rampDiv = document.getElementById(`ramp-${index}`);
+    if (rampDiv) {
+        const gradient = colorGradients[gradientName];
+        let gradientStr = 'linear-gradient(to right';
+        
+        gradient.forEach((color, i) => {
+            const [r, g, b] = color;
+            const percent = (i / (gradient.length - 1)) * 100;
+            gradientStr += `, rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}) ${percent}%`;
+        });
+        
+        gradientStr += ')';
+        rampDiv.style.background = gradientStr;
+    }
+}
+
+// 移除UV层
+function removeUVLayer(index) {
+    if (index < 0 || index >= uvLayers.length) return;
+    
+    uvLayers.splice(index, 1);
+    
+    // 重置着色器uniform
+    if (customMaterial) {
+        // 重新索引所有层
+        uvLayers.forEach((layer, i) => {
+            layer.index = i;
+            
+            const uniformName = `uvLayer${i + 1}`;
+            const opacityName = `opacity${i + 1}`;
+            const rampName = `colorRamp${i + 1}`;
+            
+            customMaterial.uniforms[uniformName].value = layer.texture;
+            customMaterial.uniforms[opacityName].value = layer.opacity;
+            customMaterial.uniforms[rampName].value = generateColorTexture(layer.gradient);
+        });
+        
+        // 清空剩余的层
+        for (let i = uvLayers.length + 1; i <= 4; i++) {
+            customMaterial.uniforms[`uvLayer${i}`].value = null;
+            customMaterial.uniforms[`opacity${i}`].value = 0.0;
+        }
+    }
+    
+    // 更新UI
+    createUVControlPanel();
+}
+
+// 生成模拟数据纹理
+function generateSimulatedDataTexture(width = 512, height = 512) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    
+    // 创建Perlin噪声模式
+    const imageData = ctx.createImageData(width, height);
+    
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const index = (y * width + x) * 4;
+            
+            // 创建大脑形状的噪声
+            const dx = (x - width / 2) / (width / 2);
+            const dy = (y - height / 2) / (height / 2);
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            if (distance < 0.8) {
+                // 在大脑形状内创建噪声
+                const noise = (Math.sin(x * 0.05) * Math.cos(y * 0.05) + 1) * 0.5;
+                const value = Math.floor(noise * 255);
+                
+                imageData.data[index] = value;     // R
+                imageData.data[index + 1] = value; // G
+                imageData.data[index + 2] = value; // B
+                imageData.data[index + 3] = 255;   // A
+            } else {
+                // 大脑形状外为黑色
+                imageData.data[index] = 0;
+                imageData.data[index + 1] = 0;
+                imageData.data[index + 2] = 0;
+                imageData.data[index + 3] = 0;
+            }
+        }
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+}
+
+// 创建替代脑模型（如果GLB加载失败）
+function createFallbackBrainModel() {
+    console.log('创建替代脑模型...');
+    
+    // 创建一个更详细的球体作为脑模型
+    const brainGeometry = new THREE.SphereGeometry(1, 64, 64);
+    
+    // 轻微变形使球体更像大脑
+    const positionAttribute = brainGeometry.attributes.position;
+    const vertex = new THREE.Vector3();
+    
+    for (let i = 0; i < positionAttribute.count; i++) {
+        vertex.fromBufferAttribute(positionAttribute, i);
+        
+        // 创建左右半球的效果
+        const scaleX = vertex.x > 0 ? 0.9 : 0.85;
+        const scaleY = 1.2;
+        const scaleZ = 0.8;
+        
+        vertex.x *= scaleX;
+        vertex.y *= scaleY;
+        vertex.z *= scaleZ;
+        
+        // 添加一些不规则性
+        const noise = 0.05 * Math.sin(vertex.y * 10) * Math.cos(vertex.z * 10);
+        vertex.x += noise;
+        vertex.y += noise * 0.5;
+        
+        positionAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
+    }
+    
+    brainGeometry.computeVertexNormals();
+    
+    // 创建自定义材质
+    customMaterial = createMultiUVMaterial(0x333333);
+    
+    // 创建UV坐标（如果几何体没有）
+    if (!brainGeometry.attributes.uv) {
+        const count = positionAttribute.count;
+        const uvs = [];
+        
+        for (let i = 0; i < count; i++) {
+            vertex.fromBufferAttribute(positionAttribute, i);
+            vertex.normalize();
+            
+            // 球面映射
+            const u = (Math.atan2(vertex.z, vertex.x) + Math.PI) / (2 * Math.PI);
+            const v = (Math.asin(vertex.y) + Math.PI / 2) / Math.PI;
+            uvs.push(u, 1 - v);
+        }
+        
+        brainGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    }
+    
+    // 创建网格
+    const brainMesh = new THREE.Mesh(brainGeometry, customMaterial);
+    brainMesh.castShadow = true;
+    brainMesh.receiveShadow = true;
+    
+    brainModel = brainMesh;
+    scene.add(brainModel);
+    
+    console.log('替代脑模型创建完成');
+    
+    // 创建UI控制面板
+    createUVControlPanel();
+    
+    // 添加默认的UV层
+    addUVLayer('UV1', generateFNIRSTexture());
+    addUVLayer('UV2', generateSimulatedEEGTexture());
+}
+
+// 动画循环
+function animate() {
+    requestAnimationFrame(animate);
+    
+    // 更新时间uniform
+    if (customMaterial) {
+        customMaterial.uniforms.time.value += 0.01;
+    }
+    
+    // 旋转大脑模型
+    if (brainModel) {
+        brainModel.rotation.y += 0.001;
+    }
+    
+    controls.update();
+    renderer.render(scene, camera);
+}
+
+animate();
+
+// 窗口大小调整
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// 导出函数到全局作用域，供HTML按钮调用
+window.removeUVLayer = removeUVLayer;
+window.changeGradient = changeGradient;
+window.updateLayerOpacity = updateLayerOpacity;
+
+console.log('多UV脑可视化系统已初始化！');
